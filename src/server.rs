@@ -319,6 +319,7 @@ pub mod sockets {
             Json(json!({ "message": "This should not be reached" })),
         )
     }
+
     // The axum /register endpoint
     async fn register(Json(payload): Json<Value>) -> impl IntoResponse {
         // Cors is a pain in the ass but have to give these in the header for the browser
@@ -438,6 +439,96 @@ pub mod sockets {
         }
     }
 
+    // The axum /delete endpoint
+    async fn delete(Json(payload): Json<Value>) -> impl IntoResponse {
+        // Cors is a pain in the ass but have to give these in the header for the browser
+        let cors = [("Access-Control-Allow-Origin", "*"),
+                    ("Access-Control-Allow-Headers", "authorization, content-type")];
+        // Database connection information built from the secrets
+        let db_host= dotenv::var("DB_HOST").unwrap();
+        let db_port = dotenv::var("DB_PORT").unwrap();
+        let db_user = dotenv::var("DB_USER").unwrap();
+        let db_password = dotenv::var("DB_PASSWORD").unwrap();
+        let db_db = dotenv::var("DB_DB").unwrap();
+
+        let opts = OptsBuilder::new()
+            .ip_or_hostname(Some(db_host))
+            .tcp_port(db_port.parse().unwrap_or(6969))
+            .user(Some(db_user))
+            .pass(Some(db_password))
+            .db_name(Some(db_db));
+
+        // Extract the stuff we need from the payload
+        let username = payload
+            .get("username")
+            .and_then(|u| u.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        if username.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                cors,
+                Json(json!({ "message": "Username missing" })),
+            );
+        };
+
+        // Make a database connection
+        let pool = match Pool::new(opts) {
+            Ok(p) => p,
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    cors,
+                    Json(json!({ "message": "DB connection failed" })),
+                )
+            }
+        };
+        let mut conn = match pool.get_conn() {
+            Ok(c) => c,
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    cors,
+                    Json(json!({ "message": "Failed to get DB connection" })),
+                )
+            }
+        };
+
+        // Check if the user exists in the database
+        let result: Option<(String, String)> = conn
+            .exec_first("SELECT name, hash FROM users WHERE name = :username",
+                        params! { "username" => &username })
+            .unwrap_or(None);
+
+        match result {
+            // If it didn't find the user, make one
+            Some((_name, _hash))=> {
+                match conn
+                    .exec_drop("DELETE FROM users WHERE name = :username",
+                     params! { "username" => &username})
+                     {
+                        Ok(()) => { return (
+                            StatusCode::OK,
+                            cors,
+                            Json(json!({ "Message": "User deleted" })),
+                        )},
+                        Err(e) => {return (
+                            StatusCode::UNAUTHORIZED,
+                            cors,
+                            Json(json!({ "message": format!("Failed to delete user: {:?}]", e) })),
+                        )},
+                }
+            },
+            None => { return (
+                    StatusCode::FORBIDDEN,
+                    cors,
+                    Json(json!({ "message": "User does not exist, create one using register" })),
+            )}
+        }
+    }
+
     // The axum /protected endpoint for who knows what (prolly just cheking that the token is correct, I just translated this)
     async fn protected(headers: HeaderMap) -> impl IntoResponse {
         let cors = [("Access-Control-Allow-Origin", "*"),
@@ -506,6 +597,7 @@ pub mod sockets {
         let app = Router::new()
             .route("/api/login", post(login).options(cors_preflight))
             .route("/api/register", post(register).options(cors_preflight))
+            .route("/api/delete", post(delete).options(cors_preflight))
             .route("/api/protected", get(protected).options(cors_preflight));
 
         let bind_location = "127.0.0.1:3100";
